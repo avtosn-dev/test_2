@@ -1,0 +1,27 @@
+# Сборка и отладочные файлы
+Debug/
+Release/
+*.d
+*.o
+*.crf
+*.htm
+*.map
+*.axf
+*.hex
+*.bin
+*.lst
+*.dep
+*.su
+
+# CubeMX и IDE
+.mxproject
+.cproject
+.project
+.settings/
+*.launch
+*.ioc.bak
+
+# Временные файлы
+*~
+*.bak
+*.swp

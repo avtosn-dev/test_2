@@ -1,0 +1,6 @@
+../Core/Src/debug.c:14:6:debug_status_init	1
+../Core/Src/debug.c:19:6:debug_status_run	1
+../Core/Src/debug.c:28:6:debug_init_print_init	1
+../Core/Src/debug.c:33:6:debug_init_print_run	1
+../Core/Src/debug.c:47:6:debug_watchdog_feed_init	1
+../Core/Src/debug.c:52:6:debug_watchdog_feed_run	1

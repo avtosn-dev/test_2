@@ -1,0 +1,3 @@
+../Core/Src/task_uart_input.c:26:13:process_command	20
+../Core/Src/task_uart_input.c:127:6:task_uart_input_init	1
+../Core/Src/task_uart_input.c:133:6:task_uart_input_run	7

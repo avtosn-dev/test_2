@@ -1,0 +1,8 @@
+../Core/Src/task_sensor_read.c:52:13:print_sensor_list	5
+../Core/Src/task_sensor_read.c:75:13:rom_crc_valid	2
+../Core/Src/task_sensor_read.c:81:13:print_rom_crc_diagnostics	5
+../Core/Src/task_sensor_read.c:109:9:task_sensor_read_get_selected_index	1
+../Core/Src/task_sensor_read.c:114:6:task_sensor_read_select_by_index	3
+../Core/Src/task_sensor_read.c:129:6:task_sensor_read_select_by_rom	5
+../Core/Src/task_sensor_read.c:147:6:task_sensor_read_init	1
+../Core/Src/task_sensor_read.c:166:6:task_sensor_read_run	18
