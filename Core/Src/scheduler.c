@@ -2,9 +2,14 @@
   * @file    scheduler.c
   * @brief   Cooperative scheduler implementation
   * @details Implements tick‑based task scheduling with period checking,
-  *          overrun detection, one‑shot task auto‑removal, and debug UART.
-  *          Tasks are executed in round‑robin order when their period expires.
-  *          No blocking calls inside scheduler_run() except user tasks.
+  *          overrun detection, one‑shot task auto‑removal, and optional debug
+  *          listing over UART. For step‑by‑step instructions on writing and
+  *          registering application tasks, see the block comment in scheduler.h
+  *          ("HOW TO ADD APPLICATION TASKS").
+  *
+  *          Tasks are processed in fixed table order each time `scheduler_run()`
+  *          decides their period has elapsed. There are no blocking calls inside
+  *          this file except indirectly when a task invokes a blocking HAL/API.
   */
 
 #include "scheduler.h"

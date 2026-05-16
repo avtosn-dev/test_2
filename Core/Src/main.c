@@ -1,24 +1,20 @@
 /* USER CODE BEGIN Header */
 /**
   * @file    main.c
-  * @brief   Cooperative scheduler demo with DS18B20 multi‑sensor support,
-  *          UART command interface and debug services (LED task removed)
-  * @details
-  * HARDWARE:
-  *   - MCU: STM32F103C8T6 (BluePill)
-  *   - UART: USART1 (PA9 TX, PA10 RX) 115200 8N1
-  *   - Sensor: DS18B20 on PB5 with 4.7kΩ pull‑up to 3.3V
+  * @brief   Minimal firmware entry: HAL init + cooperative scheduler loop only.
   *
-  * LOGIC:
-  *   - System clock: 72 MHz (HSE 8 MHz x9)
-  *   - Scheduler tick: 1 ms (SysTick via HAL_GetTick)
-  *   - Tasks registered:
-  *       1) task_sensor_read_run    – 100 ms, periodic (DS18B20 FSM)
-  *       2) task_uart_print_run     – 2000 ms, periodic (print temperature)
-  *       3) task_uart_input_run     – 100 ms, periodic (non‑blocking UART input)
-  *       4) debug_status_run        – 10000 ms, periodic (scheduler status)
-  *       5) debug_watchdog_feed_run – 1000 ms, periodic (IWDG refresh)
-  *       6) debug_init_print_run    – 200 ms, one‑shot (initial status)
+  * @details
+  * This project is intentionally wired as a **standalone scheduler**:
+  * no application tasks are registered here. USART1 is initialised so you can
+  * optionally call scheduler_set_debug_uart() and scheduler_print_status() for
+  * diagnostics (see scheduler.h for how to add your own tasks).
+  *
+  * HARDWARE (typical Blue Pill):
+  *   - MCU: STM32F103C8
+  *   - UART: USART1 (PA9 TX, PA10 RX), 115200 8N1 — pins configured in HAL_UART_MspInit()
+  *
+  * TIME BASE:
+  *   - SysTick drives HAL_GetTick() at 1 ms; the scheduler relies on that (see SCHEDULER_TICK_MS).
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
@@ -27,13 +23,6 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "scheduler.h"
-#include "task_sensor_read.h"
-#include "task_uart_print.h"
-#include "task_uart_input.h"
-#include "debug.h"
-#include "onewire_config.h"
-#include <string.h>
-#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -102,26 +91,25 @@ HAL_Init();
   MX_GPIO_Init();
   MX_USART1_UART_Init();
 
-  HAL_Delay(2000);
+  /* USER CODE BEGIN 2 */
 
-   scheduler_init();
+  scheduler_init();
+  /* Optional: enable scheduler_print_status() output on USART1 */
   scheduler_set_debug_uart(&huart1);
 
-      /* Initialise all tasks */
-      task_sensor_read_init();   /* This prints sensor list on startup */
-      task_uart_print_init();
-      task_uart_input_init();
-      debug_status_init();
-      debug_watchdog_feed_init();
-      debug_init_print_init();
-
-      /* Register tasks with scheduler */
-      scheduler_add_task(task_sensor_read_run,    1000U,  TASK_MODE_PERIODIC_T, "Sensor");
-      scheduler_add_task(task_uart_print_run,    10000U,  TASK_MODE_PERIODIC_T, "PrintTemp");
-      scheduler_add_task(task_uart_input_run,     100U,  TASK_MODE_PERIODIC_T, "UartInput");
-      //scheduler_add_task(debug_status_run,      10000U,  TASK_MODE_PERIODIC_T, "Debug");
-      //scheduler_add_task(debug_watchdog_feed_run,1000U,  TASK_MODE_PERIODIC_T, "WDG");
-      //scheduler_add_task(debug_init_print_run,    200U,  TASK_MODE_ONE_SHOT_T, "InitPrint");
+  /*
+   * -------------------------------------------------------------------------
+   * Register your application tasks here (see scheduler.h, section
+   * "HOW TO ADD APPLICATION TASKS").
+   * Example (commented out — requires your task module):
+   *
+   *   my_task_init();
+   *   if (scheduler_add_task(my_task_run, 100U, TASK_MODE_PERIODIC_T, "MyTask") != SCH_STATUS_OK_T)
+   *   {
+   *       Error_Handler();
+   *   }
+   * -------------------------------------------------------------------------
+   */
 
   /* USER CODE END 2 */
 
@@ -218,25 +206,15 @@ static void MX_USART1_UART_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
 
-  /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOD_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(ONEWIRE_PORT, ONEWIRE_PIN, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin : 1-Wire data line */
-  GPIO_InitStruct.Pin = ONEWIRE_PIN;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(ONEWIRE_PORT, &GPIO_InitStruct);
+  /*
+   * Scheduler-only build: no application pins here.
+   * USART1 (PA9/PA10) is configured in HAL_UART_MspInit() when UART is used.
+   * Add your own GPIO_Init code in the USER CODE sections when you attach hardware.
+   */
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
