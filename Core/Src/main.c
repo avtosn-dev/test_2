@@ -7,7 +7,7 @@
   * This project is intentionally wired as a **standalone scheduler**:
   * no application tasks are registered here. USART1 is initialised so you can
   * optionally call scheduler_set_debug_uart() and scheduler_print_status() for
-  * diagnostics (see scheduler.h for how to add your own tasks).
+  * diagnostics (see scheduler.h and the guide at the top of scheduler.c).
   *
   * HARDWARE (typical Blue Pill):
   *   - MCU: STM32F103C8

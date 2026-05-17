@@ -1,56 +1,39 @@
 /**
   * @file    scheduler_config.h
-  * @brief   Cooperative scheduler compile-time configuration parameters
-  * @details This file contains all tunable constants for the scheduler.
-  *          Modify values here to adjust maximum number of tasks, timing,
-  *          overrun detection, and debug features.
+  * @brief   Compile-time settings for the cooperative scheduler
+  *
+  * Change these values to fit your project. All timing assumes HAL_GetTick()
+  * advances every 1 ms (default after HAL_Init() on STM32).
   */
 
 #ifndef SCHEDULER_CONFIG_H
 #define SCHEDULER_CONFIG_H
 
-/*============================================================================*/
-/*                          Task table configuration                          */
-/*============================================================================*/
+/** Maximum tasks registered at the same time (1 .. 16). */
+#define SCHEDULER_MAX_TASKS         8U
+
+/** Task name buffer size in bytes (includes the '\0' terminator). */
+#define SCHEDULER_NAME_LEN          16U
 
 /**
-  * @brief Maximum number of tasks that can be registered simultaneously
-  * @note  Valid range: 1 .. 16 (limited by scheduler design)
+  * Must match HAL tick period in milliseconds (HAL_GetTick step).
+  * Do not change unless you use a custom HAL time base.
   */
-#define SCHEDULER_MAX_TASKS     16U
+#define SCHEDULER_TICK_MS           1U
 
 /**
-  * @brief Length of task name string (including null terminator)
-  * @note  Longer names will be truncated during registration
+  * If a task is late by more than (period + period * OVERRUN_PCT / 100),
+  * the overrun flag is set (diagnostic only).
   */
-#define SCHEDULER_NAME_LEN      16U
-
-/*============================================================================*/
-/*                          Timing and overrun detection                      */
-/*============================================================================*/
+#define SCHEDULER_OVERRUN_PCT       10U
 
 /**
-  * @brief Scheduler tick period in milliseconds
-  * @note  Must match the period of the timebase (SysTick or TIM2).
-  *        HAL_GetTick() provides 1 ms tick – this value must stay 1.
+  * After a long pause, a task could run many times in one scheduler_run() pass.
+  * If delay >= period * BURST_LIMIT, last_tick is reset to "now" (drop backlog).
   */
-#define SCHEDULER_TICK_MS       1U
+#define SCHEDULER_BURST_LIMIT       2U
 
-/**
-  * @brief Overrun detection margin, percent of task period
-  * @details A task is considered overrun if its actual execution delay
-  *          exceeds (period_ms + period_ms * OVERRUN_PCT / 100).
-  * @example With 10%, a 100 ms task overruns if delayed by >110 ms.
-  */
-#define SCHEDULER_OVERRUN_PCT   10U
-
-/**
-  * @brief Burst limit for consecutive task executions after a long delay
-  * @details If the scheduler was blocked for a long time, the task may be
-  *          executed multiple times in a row to catch up.
-  *          This limit prevents excessive back‑to‑back executions.
-  *          With BURST_LIMIT = 2, at most 2 consecutive runs are allowed.
-  */
-#define SCHEDULER_BURST_LIMIT   2U
+/** Timeout for HAL_UART_Transmit() inside scheduler_print_status(). */
+#define SCHEDULER_UART_TIMEOUT_MS   100U
 
 #endif /* SCHEDULER_CONFIG_H */

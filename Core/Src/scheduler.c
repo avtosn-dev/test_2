@@ -1,126 +1,276 @@
 /**
   * @file    scheduler.c
-  * @brief   Cooperative scheduler implementation
-  * @details Implements tick‑based task scheduling with period checking,
-  *          overrun detection, one‑shot task auto‑removal, and optional debug
-  *          listing over UART. For step‑by‑step instructions on writing and
-  *          registering application tasks, see the block comment in scheduler.h
-  *          ("HOW TO ADD APPLICATION TASKS").
+  * @brief   Cooperative scheduler — beginner-oriented implementation
   *
-  *          Tasks are processed in fixed table order each time `scheduler_run()`
-  *          decides their period has elapsed. There are no blocking calls inside
-  *          this file except indirectly when a task invokes a blocking HAL/API.
+  * =============================================================================
+  * HOW THE SCHEDULER WORKS (read this first)
+  * =============================================================================
+  *
+  * 1) You register tasks with scheduler_add_task().
+  *    Each task is just a normal C function void MyTask(void).
+  *
+  * 2) In main(), you call scheduler_run() inside while(1).
+  *
+  * 3) Every time scheduler_run() is called, it:
+  *      a) Reads the current time: now = HAL_GetTick()  (HAL, 1 ms tick)
+  *      b) For each registered task, checks: has period_ms passed since last run?
+  *      c) If yes, calls the task function once
+  *      d) Removes tasks marked for deletion (one-shot finished, or user remove)
+  *
+  * 4) Because nothing runs in the background, a task that blocks (HAL_Delay, long
+  *    UART transmit, etc.) delays ALL other tasks. Write short tasks or use a
+  *    state machine with HAL_GetTick() instead of blocking delays.
+  *
+  * =============================================================================
+  * HOW TO ADD YOUR OWN TASK (copy this pattern)
+  * =============================================================================
+  *
+  *   // file: my_blink.c
+  *   #include "main.h"
+  *
+  *   static uint32_t s_last_toggle = 0U;
+  *
+  *   void MyBlink_Run(void)
+  *   {
+  *       uint32_t now = HAL_GetTick();
+  *       if ((now - s_last_toggle) >= 500U) {
+  *           s_last_toggle = now;
+  *           HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
+  *       }
+  *   }
+  *
+  *   // file: main.c (after MX_GPIO_Init / peripherals)
+  *   scheduler_init();
+  *   if (scheduler_add_task(MyBlink_Run, 50U, TASK_MODE_PERIODIC_T, "Blink")
+  *       != SCH_STATUS_OK_T) {
+  *       Error_Handler();
+  *   }
+  *   while (1) {
+  *       scheduler_run();
+  *   }
+  *
+  * =============================================================================
+  * KNOWN LIMITATIONS (previous version issues — fixed or documented here)
+  * =============================================================================
+  *
+  * FIXED: Task counter (s_task_count) was decremented twice in some paths.
+  * FIXED: Burst limit multiplication could overflow for huge period_ms.
+  * FIXED: Name lookup now uses strcmp() on null-terminated names (exact match).
+  *
+  * STILL TRUE (by design):
+  *   - Cooperative only: no preemption, no priorities.
+  *   - While a task runs, scheduler_run() does not visit other tasks.
+  *   - Duplicate names are rejected until the old slot is cleaned up.
+  *
+  * =============================================================================
   */
 
 #include "scheduler.h"
 #include <string.h>
 #include <stdio.h>
 
-/*============================================================================*/
-/*                        Compile‑time assertions                             */
-/*============================================================================*/
+/* -------------------------------------------------------------------------- */
+/* Compile-time checks                                                         */
+/* -------------------------------------------------------------------------- */
 
 _Static_assert(SCHEDULER_MAX_TASKS > 0U, "SCHEDULER_MAX_TASKS must be > 0");
 _Static_assert(SCHEDULER_MAX_TASKS <= 16U, "SCHEDULER_MAX_TASKS max is 16");
-_Static_assert(SCHEDULER_NAME_LEN > 1U, "SCHEDULER_NAME_LEN must be > 1");
-_Static_assert(SCHEDULER_TICK_MS == 1U, "SCHEDULER_TICK_MS must be 1 (HAL_GetTick)");
+_Static_assert(SCHEDULER_NAME_LEN >= 2U, "SCHEDULER_NAME_LEN must be >= 2");
+_Static_assert(SCHEDULER_TICK_MS == 1U, "SCHEDULER_TICK_MS must be 1 for HAL_GetTick");
 _Static_assert(SCHEDULER_BURST_LIMIT > 0U, "SCHEDULER_BURST_LIMIT must be > 0");
 
-/*============================================================================*/
-/*                        Private variables                                   */
-/*============================================================================*/
+/* -------------------------------------------------------------------------- */
+/* Private data                                                                */
+/* -------------------------------------------------------------------------- */
 
-static TASK_CB_T           s_tasks[SCHEDULER_MAX_TASKS];
-static uint8_t             s_task_count = 0U;
+/** Fixed-size table: one entry per possible task */
+static TASK_CB_T s_tasks[SCHEDULER_MAX_TASKS];
+
+/** Number of rows with in_use == true (maintained on add / cleanup only) */
+static uint8_t s_active_count = 0U;
+
+/** Optional UART for scheduler_print_status(); NULL = print disabled */
 static UART_HandleTypeDef *s_debug_uart = NULL;
 
-/*============================================================================*/
-/*                        Private function prototypes                         */
-/*============================================================================*/
-
-static uint8_t find_task_by_name(const char *name);
-static uint8_t find_name_any_state(const char *name);
-static uint8_t find_empty_slot(void);
-static void    mark_for_removal(uint8_t idx);
-
-/*============================================================================*/
-/*                        Private functions                                   */
-/*============================================================================*/
+/* -------------------------------------------------------------------------- */
+/* Private helpers                                                             */
+/* -------------------------------------------------------------------------- */
 
 /**
-  * @brief Find a task that is active (not pending removal)
-  * @param name Task name (must not be NULL)
-  * @return Task index or SCHEDULER_MAX_TASKS if not found
+  * @brief Send a null-terminated string on the debug UART (blocking HAL call).
   */
-static uint8_t find_task_by_name(const char *name)
+static void uart_print(const char *text)
 {
-    if (name == NULL) return SCHEDULER_MAX_TASKS;
+    if ((s_debug_uart == NULL) || (text == NULL)) {
+        return;
+    }
+    size_t len = strlen(text);
+    if (len == 0U) {
+        return;
+    }
+    (void)HAL_UART_Transmit(s_debug_uart, (const uint8_t *)text, (uint16_t)len,
+                            SCHEDULER_UART_TIMEOUT_MS);
+}
 
-    for (uint8_t i = 0U; i < SCHEDULER_MAX_TASKS; i++)
-    {
-        if ((s_tasks[i].func != NULL) &&
-            (s_tasks[i].pending_remove == PENDING_REMOVE_NONE_T) &&
-            (strncmp(s_tasks[i].name, name, SCHEDULER_NAME_LEN) == 0))
-        {
+/**
+  * @brief Find table index by exact task name (active rows only).
+  * @return Slot index or SCHEDULER_INVALID_SLOT.
+  */
+static uint8_t find_slot_by_name(const char *name)
+{
+    if (name == NULL) {
+        return SCHEDULER_INVALID_SLOT;
+    }
+
+    for (uint8_t i = 0U; i < SCHEDULER_MAX_TASKS; i++) {
+        if (!s_tasks[i].in_use) {
+            continue;
+        }
+        if (strcmp(s_tasks[i].name, name) == 0) {
             return i;
         }
     }
-    return SCHEDULER_MAX_TASKS;
+    return SCHEDULER_INVALID_SLOT;
 }
 
 /**
-  * @brief Find a task by name even if pending removal (used for duplicate check)
-  * @param name Task name
-  * @return Task index or SCHEDULER_MAX_TASKS
+  * @brief First free row in the table.
   */
-static uint8_t find_name_any_state(const char *name)
+static uint8_t find_free_slot(void)
 {
-    if (name == NULL) return SCHEDULER_MAX_TASKS;
-
-    for (uint8_t i = 0U; i < SCHEDULER_MAX_TASKS; i++)
-    {
-        if ((s_tasks[i].func != NULL) &&
-            (strncmp(s_tasks[i].name, name, SCHEDULER_NAME_LEN) == 0))
-        {
+    for (uint8_t i = 0U; i < SCHEDULER_MAX_TASKS; i++) {
+        if (!s_tasks[i].in_use) {
             return i;
         }
     }
-    return SCHEDULER_MAX_TASKS;
+    return SCHEDULER_INVALID_SLOT;
 }
 
 /**
-  * @brief Find first empty slot in task table (func == NULL)
-  * @return Slot index or SCHEDULER_MAX_TASKS if table is full
+  * @brief Clear one row and update the active task counter.
   */
-static uint8_t find_empty_slot(void)
+static void free_slot(uint8_t idx)
 {
-    for (uint8_t i = 0U; i < SCHEDULER_MAX_TASKS; i++)
-    {
-        if (s_tasks[i].func == NULL) return i;
+    if (idx >= SCHEDULER_MAX_TASKS) {
+        return;
     }
-    return SCHEDULER_MAX_TASKS;
+    if (s_tasks[idx].in_use && (s_active_count > 0U)) {
+        s_active_count--;
+    }
+    memset(&s_tasks[idx], 0, sizeof(TASK_CB_T));
 }
 
 /**
-  * @brief Mark a task for removal (cleared in next scheduler_run())
-  * @param idx Task index
+  * @brief Schedule row for deletion on the next cleanup pass.
   */
-static void mark_for_removal(uint8_t idx)
+static void request_remove(uint8_t idx)
 {
-    if (idx >= SCHEDULER_MAX_TASKS) return;
+    if (idx >= SCHEDULER_MAX_TASKS) {
+        return;
+    }
+    s_tasks[idx].remove_pending = true;
     s_tasks[idx].state = TASK_STATE_DISABLED_T;
-    s_tasks[idx].pending_remove = PENDING_REMOVE_EXPLICIT_T;
-    if (s_task_count > 0U) s_task_count--;
 }
 
-/*============================================================================*/
-/*                        Public functions                                    */
-/*============================================================================*/
+/**
+  * @brief Overrun threshold in ms: period + margin percent (overflow-safe).
+  */
+static uint32_t overrun_limit_ms(uint32_t period_ms)
+{
+    if (period_ms > (UINT32_MAX / (100U + SCHEDULER_OVERRUN_PCT))) {
+        return UINT32_MAX;
+    }
+    return period_ms + (period_ms * SCHEDULER_OVERRUN_PCT / 100U);
+}
+
+/**
+  * @brief True if delay is so large we should not catch up multiple runs.
+  */
+static bool burst_catchup_exceeded(uint32_t delay_ms, uint32_t period_ms)
+{
+    if (period_ms == 0U) {
+        return false;
+    }
+    if (period_ms > (UINT32_MAX / SCHEDULER_BURST_LIMIT)) {
+        return (delay_ms >= UINT32_MAX);
+    }
+    return (delay_ms >= (period_ms * SCHEDULER_BURST_LIMIT));
+}
+
+/**
+  * @brief Update last_run_tick after a run (catch-up or single period step).
+  */
+static void advance_last_run_tick(uint8_t idx, uint32_t now, uint32_t delay_ms)
+{
+    if (burst_catchup_exceeded(delay_ms, s_tasks[idx].period_ms)) {
+        s_tasks[idx].last_run_tick = now;
+    } else {
+        s_tasks[idx].last_run_tick += s_tasks[idx].period_ms;
+    }
+}
+
+/**
+  * @brief Run one task if it is enabled and its period has elapsed.
+  */
+static void try_run_task(uint8_t idx, uint32_t now)
+{
+    TASK_CB_T *t = &s_tasks[idx];
+
+    if (!t->in_use || t->remove_pending) {
+        return;
+    }
+    if (t->state != TASK_STATE_ENABLED_T) {
+        return;
+    }
+    if (t->func == NULL) {
+        return;
+    }
+
+    uint32_t delay_ms = now - t->last_run_tick;
+    if (delay_ms < t->period_ms) {
+        return;
+    }
+
+    /* Diagnostic: task is late compared to its period */
+    if (delay_ms > overrun_limit_ms(t->period_ms)) {
+        t->overrun = true;
+        if (t->overrun_count < UINT32_MAX) {
+            t->overrun_count++;
+        }
+    } else {
+        t->overrun = false;
+    }
+
+    advance_last_run_tick(idx, now, delay_ms);
+
+    /* User code runs here — keep it short */
+    t->func();
+
+    if (t->mode == TASK_MODE_ONE_SHOT_T) {
+        request_remove(idx);
+    }
+}
+
+/**
+  * @brief Second pass: free rows that were marked remove_pending.
+  */
+static void cleanup_removed_tasks(void)
+{
+    for (uint8_t i = 0U; i < SCHEDULER_MAX_TASKS; i++) {
+        if (s_tasks[i].in_use && s_tasks[i].remove_pending) {
+            free_slot(i);
+        }
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Public API                                                                  */
+/* -------------------------------------------------------------------------- */
 
 void scheduler_init(void)
 {
     memset(s_tasks, 0, sizeof(s_tasks));
-    s_task_count = 0U;
+    s_active_count = 0U;
     s_debug_uart = NULL;
 }
 
@@ -132,235 +282,197 @@ void scheduler_set_debug_uart(UART_HandleTypeDef *huart)
 SCH_STATUS_T scheduler_add_task(TASK_FUNC_T func, uint32_t period_ms,
                                 TASK_MODE_T mode, const char *name)
 {
-    /* Parameter validation */
-    if (func == NULL)       return SCH_STATUS_ERR_NULL_T;
-    if (name == NULL)       return SCH_STATUS_ERR_NULL_T;
-    if (period_ms == 0U)    return SCH_STATUS_ERR_PERIOD_T;
-    if ((mode != TASK_MODE_PERIODIC_T) && (mode != TASK_MODE_ONE_SHOT_T))
+    if ((func == NULL) || (name == NULL)) {
+        return SCH_STATUS_ERR_NULL_T;
+    }
+    if (period_ms == 0U) {
+        return SCH_STATUS_ERR_PERIOD_T;
+    }
+    if ((mode != TASK_MODE_PERIODIC_T) && (mode != TASK_MODE_ONE_SHOT_T)) {
         return SCH_STATUS_ERR_INVALID_MODE_T;
-
-    /* Check for duplicate name */
-    if (find_name_any_state(name) != SCHEDULER_MAX_TASKS)
+    }
+    if (find_slot_by_name(name) != SCHEDULER_INVALID_SLOT) {
         return SCH_STATUS_ERR_DUPLICATE_T;
+    }
 
-    /* Find free slot */
-    uint8_t slot = find_empty_slot();
-    if (slot == SCHEDULER_MAX_TASKS) return SCH_STATUS_ERR_FULL_T;
+    uint8_t slot = find_free_slot();
+    if (slot == SCHEDULER_INVALID_SLOT) {
+        return SCH_STATUS_ERR_FULL_T;
+    }
 
-    /* Initialize task control block */
-    s_tasks[slot].func           = func;
-    s_tasks[slot].period_ms      = period_ms;
-    s_tasks[slot].last_tick      = HAL_GetTick();
-    s_tasks[slot].mode           = mode;
-    s_tasks[slot].state          = TASK_STATE_ENABLED_T;
-    s_tasks[slot].pending_remove = PENDING_REMOVE_NONE_T;
-    s_tasks[slot].overrun        = 0U;
-    s_tasks[slot].overrun_count  = 0U;
-    strncpy(s_tasks[slot].name, name, SCHEDULER_NAME_LEN - 1U);
-    s_tasks[slot].name[SCHEDULER_NAME_LEN - 1U] = '\0';
+    TASK_CB_T *t = &s_tasks[slot];
+    t->in_use = true;
+    t->func = func;
+    t->period_ms = period_ms;
+    t->last_run_tick = HAL_GetTick();
+    t->mode = mode;
+    t->state = TASK_STATE_ENABLED_T;
+    t->remove_pending = false;
+    t->overrun = false;
+    t->overrun_count = 0U;
 
-    s_task_count++;
+    strncpy(t->name, name, SCHEDULER_NAME_LEN - 1U);
+    t->name[SCHEDULER_NAME_LEN - 1U] = '\0';
+
+    s_active_count++;
     return SCH_STATUS_OK_T;
 }
 
 void scheduler_run(void)
 {
+    /*
+     * Step 1 — snapshot time once per pass (all tasks use the same "now")
+     */
     uint32_t now = HAL_GetTick();
 
-    /* First pass: execute tasks whose period has elapsed */
-    for (uint8_t i = 0U; i < SCHEDULER_MAX_TASKS; i++)
-    {
-        /* Skip invalid, disabled, or pending‑removal tasks */
-        if (s_tasks[i].func == NULL) continue;
-        if (s_tasks[i].state == TASK_STATE_DISABLED_T) continue;
-        if (s_tasks[i].pending_remove != PENDING_REMOVE_NONE_T) continue;
-
-        uint32_t elapsed = now - s_tasks[i].last_tick;
-
-        if (elapsed >= s_tasks[i].period_ms)
-        {
-            /* Overrun detection with overflow‑safe calculation */
-            uint32_t overrun_threshold;
-            if (s_tasks[i].period_ms <= (UINT32_MAX / (SCHEDULER_OVERRUN_PCT + 100U)))
-            {
-                overrun_threshold = s_tasks[i].period_ms +
-                    (s_tasks[i].period_ms * SCHEDULER_OVERRUN_PCT / 100U);
-            }
-            else
-            {
-                overrun_threshold = UINT32_MAX;
-            }
-
-            if (elapsed > overrun_threshold)
-            {
-                s_tasks[i].overrun = 1U;
-                if (s_tasks[i].overrun_count < UINT32_MAX)
-                    s_tasks[i].overrun_count++;
-            }
-            else
-            {
-                s_tasks[i].overrun = 0U;
-            }
-
-            /* Burst limit: if the task has been delayed by more than
-               period_ms * BURST_LIMIT, reset last_tick to 'now' to avoid
-               excessive consecutive executions. Otherwise, advance by one period. */
-            if (elapsed >= (s_tasks[i].period_ms * SCHEDULER_BURST_LIMIT))
-            {
-                s_tasks[i].last_tick = now;
-            }
-            else
-            {
-                s_tasks[i].last_tick += s_tasks[i].period_ms;
-            }
-
-            /* Execute the task */
-            s_tasks[i].func();
-
-            /* Mark one‑shot tasks for removal after execution */
-            if ((s_tasks[i].mode == TASK_MODE_ONE_SHOT_T) &&
-                (s_tasks[i].pending_remove == PENDING_REMOVE_NONE_T))
-            {
-                s_tasks[i].pending_remove = PENDING_REMOVE_ONESHOT_T;
-            }
-        }
+    /*
+     * Step 2 — visit every table row; run due tasks
+     */
+    for (uint8_t i = 0U; i < SCHEDULER_MAX_TASKS; i++) {
+        try_run_task(i, now);
     }
 
-    /* Second pass: clean up tasks marked for removal */
-    for (uint8_t i = 0U; i < SCHEDULER_MAX_TASKS; i++)
-    {
-        if (s_tasks[i].pending_remove != PENDING_REMOVE_NONE_T)
-        {
-            if (s_tasks[i].pending_remove == PENDING_REMOVE_ONESHOT_T)
-            {
-                if (s_task_count > 0U) s_task_count--;
-            }
-            memset(&s_tasks[i], 0, sizeof(TASK_CB_T));
-        }
-    }
+    /*
+     * Step 3 — delete finished one-shot tasks and user-removed tasks
+     */
+    cleanup_removed_tasks();
 }
 
 SCH_STATUS_T scheduler_enable_task(const char *name)
 {
-    uint8_t idx = find_task_by_name(name);
-    if (idx == SCHEDULER_MAX_TASKS) return SCH_STATUS_ERR_NOT_FOUND_T;
+    uint8_t idx = find_slot_by_name(name);
+    if (idx == SCHEDULER_INVALID_SLOT) {
+        return SCH_STATUS_ERR_NOT_FOUND_T;
+    }
     s_tasks[idx].state = TASK_STATE_ENABLED_T;
-    s_tasks[idx].last_tick = HAL_GetTick();  /* Resync to avoid immediate run */
+    s_tasks[idx].last_run_tick = HAL_GetTick();
     return SCH_STATUS_OK_T;
 }
 
 SCH_STATUS_T scheduler_disable_task(const char *name)
 {
-    uint8_t idx = find_task_by_name(name);
-    if (idx == SCHEDULER_MAX_TASKS) return SCH_STATUS_ERR_NOT_FOUND_T;
-
-    if (s_tasks[idx].mode == TASK_MODE_ONE_SHOT_T)
-    {
-        mark_for_removal(idx);
-        return SCH_STATUS_OK_T;
+    uint8_t idx = find_slot_by_name(name);
+    if (idx == SCHEDULER_INVALID_SLOT) {
+        return SCH_STATUS_ERR_NOT_FOUND_T;
     }
-    s_tasks[idx].state = TASK_STATE_DISABLED_T;
+
+    if (s_tasks[idx].mode == TASK_MODE_ONE_SHOT_T) {
+        request_remove(idx);
+    } else {
+        s_tasks[idx].state = TASK_STATE_DISABLED_T;
+    }
     return SCH_STATUS_OK_T;
 }
 
 SCH_STATUS_T scheduler_remove_task(const char *name)
 {
-    uint8_t idx = find_task_by_name(name);
-    if (idx == SCHEDULER_MAX_TASKS) return SCH_STATUS_ERR_NOT_FOUND_T;
-    mark_for_removal(idx);
+    uint8_t idx = find_slot_by_name(name);
+    if (idx == SCHEDULER_INVALID_SLOT) {
+        return SCH_STATUS_ERR_NOT_FOUND_T;
+    }
+    request_remove(idx);
     return SCH_STATUS_OK_T;
 }
 
 SCH_STATUS_T scheduler_set_period(const char *name, uint32_t period_ms)
 {
-    if (period_ms == 0U) return SCH_STATUS_ERR_PERIOD_T;
-    uint8_t idx = find_task_by_name(name);
-    if (idx == SCHEDULER_MAX_TASKS) return SCH_STATUS_ERR_NOT_FOUND_T;
+    if (period_ms == 0U) {
+        return SCH_STATUS_ERR_PERIOD_T;
+    }
+    uint8_t idx = find_slot_by_name(name);
+    if (idx == SCHEDULER_INVALID_SLOT) {
+        return SCH_STATUS_ERR_NOT_FOUND_T;
+    }
     s_tasks[idx].period_ms = period_ms;
     return SCH_STATUS_OK_T;
 }
 
 SCH_STATUS_T scheduler_enable_task_by_id(uint8_t id)
 {
-    if (id >= SCHEDULER_MAX_TASKS) return SCH_STATUS_ERR_INVALID_ID_T;
-    if (s_tasks[id].func == NULL) return SCH_STATUS_ERR_INVALID_ID_T;
-    if (s_tasks[id].pending_remove != PENDING_REMOVE_NONE_T)
+    if (id >= SCHEDULER_MAX_TASKS) {
         return SCH_STATUS_ERR_INVALID_ID_T;
+    }
+    if (!s_tasks[id].in_use || s_tasks[id].remove_pending) {
+        return SCH_STATUS_ERR_INVALID_ID_T;
+    }
     s_tasks[id].state = TASK_STATE_ENABLED_T;
-    s_tasks[id].last_tick = HAL_GetTick();
+    s_tasks[id].last_run_tick = HAL_GetTick();
     return SCH_STATUS_OK_T;
 }
 
 SCH_STATUS_T scheduler_disable_task_by_id(uint8_t id)
 {
-    if (id >= SCHEDULER_MAX_TASKS) return SCH_STATUS_ERR_INVALID_ID_T;
-    if (s_tasks[id].func == NULL) return SCH_STATUS_ERR_INVALID_ID_T;
-    if (s_tasks[id].pending_remove != PENDING_REMOVE_NONE_T)
+    if (id >= SCHEDULER_MAX_TASKS) {
         return SCH_STATUS_ERR_INVALID_ID_T;
-
-    if (s_tasks[id].mode == TASK_MODE_ONE_SHOT_T)
-    {
-        mark_for_removal(id);
-        return SCH_STATUS_OK_T;
     }
-    s_tasks[id].state = TASK_STATE_DISABLED_T;
+    if (!s_tasks[id].in_use || s_tasks[id].remove_pending) {
+        return SCH_STATUS_ERR_INVALID_ID_T;
+    }
+
+    if (s_tasks[id].mode == TASK_MODE_ONE_SHOT_T) {
+        request_remove(id);
+    } else {
+        s_tasks[id].state = TASK_STATE_DISABLED_T;
+    }
     return SCH_STATUS_OK_T;
 }
 
 uint8_t scheduler_get_task_count(void)
 {
-    return s_task_count;
+    return s_active_count;
 }
 
-const TASK_CB_T* scheduler_get_task_info(const char *name)
+const TASK_CB_T *scheduler_get_task_info(const char *name)
 {
-    uint8_t idx = find_task_by_name(name);
-    if (idx == SCHEDULER_MAX_TASKS) return NULL;
+    uint8_t idx = find_slot_by_name(name);
+    if (idx == SCHEDULER_INVALID_SLOT) {
+        return NULL;
+    }
     return &s_tasks[idx];
 }
 
 SCH_STATUS_T scheduler_clear_overrun(const char *name)
 {
-    uint8_t idx = find_task_by_name(name);
-    if (idx == SCHEDULER_MAX_TASKS) return SCH_STATUS_ERR_NOT_FOUND_T;
-    s_tasks[idx].overrun = 0U;
+    uint8_t idx = find_slot_by_name(name);
+    if (idx == SCHEDULER_INVALID_SLOT) {
+        return SCH_STATUS_ERR_NOT_FOUND_T;
+    }
+    s_tasks[idx].overrun = false;
     s_tasks[idx].overrun_count = 0U;
     return SCH_STATUS_OK_T;
 }
 
 void scheduler_print_status(void)
 {
-    if (s_debug_uart == NULL) return;
-
-    char buffer[96];
+    char line[96];
     int len;
 
-    len = snprintf(buffer, sizeof(buffer),
-                   "\r\n=== SCHEDULER (max %u tasks, active %u) ===\r\n",
-                   (unsigned)SCHEDULER_MAX_TASKS, (unsigned)s_task_count);
-    if ((len > 0) && (len < (int)sizeof(buffer)))
-        HAL_UART_Transmit(s_debug_uart, (uint8_t*)buffer, (uint16_t)len, 100U);
-
-    for (uint8_t i = 0U; i < SCHEDULER_MAX_TASKS; i++)
-    {
-        if (s_tasks[i].func == NULL) continue;
-        if (s_tasks[i].pending_remove != PENDING_REMOVE_NONE_T) continue;
-
-        len = snprintf(buffer, sizeof(buffer),
-                       "[%2u] %-15s %5lu ms  %s  %s  overrun:%lu\r\n",
-                       (unsigned)i,
-                       s_tasks[i].name,
-                       (unsigned long)s_tasks[i].period_ms,
-                       (s_tasks[i].state == TASK_STATE_ENABLED_T) ? "EN" : "DIS",
-                       (s_tasks[i].mode == TASK_MODE_PERIODIC_T) ? "PER" : "ONE",
-                       (unsigned long)s_tasks[i].overrun_count);
-        if ((len > 0) && (len < (int)sizeof(buffer)))
-            HAL_UART_Transmit(s_debug_uart, (uint8_t*)buffer, (uint16_t)len, 100U);
+    len = snprintf(line, sizeof(line),
+                   "\r\n=== Scheduler: %u / %u tasks ===\r\n",
+                   (unsigned)s_active_count, (unsigned)SCHEDULER_MAX_TASKS);
+    if ((len > 0) && (len < (int)sizeof(line))) {
+        uart_print(line);
     }
 
-    len = snprintf(buffer, sizeof(buffer), "================================\r\n");
-    if ((len > 0) && (len < (int)sizeof(buffer)))
-        HAL_UART_Transmit(s_debug_uart, (uint8_t*)buffer, (uint16_t)len, 100U);
+    for (uint8_t i = 0U; i < SCHEDULER_MAX_TASKS; i++) {
+        const TASK_CB_T *t = &s_tasks[i];
+
+        if (!t->in_use || t->remove_pending) {
+            continue;
+        }
+
+        len = snprintf(line, sizeof(line),
+                       "[%u] %-12s %lu ms  %s  %s  late:%lu\r\n",
+                       (unsigned)i,
+                       t->name,
+                       (unsigned long)t->period_ms,
+                       (t->state == TASK_STATE_ENABLED_T) ? "ON" : "OFF",
+                       (t->mode == TASK_MODE_PERIODIC_T) ? "PER" : "1SHOT",
+                       (unsigned long)t->overrun_count);
+        if ((len > 0) && (len < (int)sizeof(line))) {
+            uart_print(line);
+        }
+    }
+
+    uart_print("================================\r\n");
 }
-
-
