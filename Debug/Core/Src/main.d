@@ -23,9 +23,7 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_pwr.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_uart.h \
  ../Core/Inc/scheduler.h ../Core/Inc/main.h \
- ../Core/Inc/scheduler_config.h ../Core/Inc/task_sensor_read.h \
- ../Core/Inc/task_uart_print.h ../Core/Inc/task_uart_input.h \
- ../Core/Inc/debug.h ../Core/Inc/onewire_config.h
+ ../Core/Inc/scheduler_config.h
 ../Core/Inc/main.h:
 ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal.h:
 ../Core/Inc/stm32f1xx_hal_conf.h:
@@ -53,8 +51,3 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
 ../Core/Inc/scheduler.h:
 ../Core/Inc/main.h:
 ../Core/Inc/scheduler_config.h:
-../Core/Inc/task_sensor_read.h:
-../Core/Inc/task_uart_print.h:
-../Core/Inc/task_uart_input.h:
-../Core/Inc/debug.h:
-../Core/Inc/onewire_config.h:
