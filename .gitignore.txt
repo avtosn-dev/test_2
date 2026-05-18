@@ -1,27 +1,84 @@
-# Сборка и отладочные файлы
+# ============================================================
+# .cursorignore for STM32CubeIDE projects
+# Version: 1.0
+# Purpose: Track only USER-EDITABLE files, ignore CubeMX-generated
+# Place this file in the ROOT folder of your CubeIDE project
+# ============================================================
+
+# === CubeMX auto-generated (DO NOT EDIT MANUALLY) ===
+Drivers/
+Middlewares/
+
+# === CubeMX project metadata ===
+*.ioc
+.mxproject
+
+# === CubeIDE build output ===
 Debug/
 Release/
-*.d
-*.o
-*.crf
-*.htm
-*.map
-*.axf
-*.hex
-*.bin
-*.lst
-*.dep
-*.su
 
-# CubeMX и IDE
-.mxproject
-.cproject
-.project
+# === CubeIDE workspace metadata ===
 .settings/
 *.launch
-*.ioc.bak
+.cproject
+.project
 
-# Временные файлы
-*~
-*.bak
-*.swp
+# === Compiled objects ===
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+*.list
+*.srec
+
+# === OS junk ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === DOCUMENTATION / Images (optional — uncomment if needed) ===
+# *.pdf
+# *.png
+# *.jpg
+# *.svg
+
+# ============================================================
+# EXPLICIT INCLUSIONS (override any directory ignore above)
+# These are the ONLY files you should edit in CubeIDE
+# ============================================================
+!Core/Src/**
+!Core/Inc/**
+
+# === Scheduler project-specific files ===
+!Core/Src/scheduler.c
+!Core/Src/scheduler.h       # if placed in Src (not Inc)
+!Core/Src/tasks.c
+!Core/Src/task_sensor.c
+!Core/Src/task_menu.c
+!Core/Src/ds18b20.c
+!Core/Src/devices.c
+!Core/Src/uart_io.c
+!Core/Src/events.c
+
+!Core/Inc/scheduler.h
+!Core/Inc/tasks.h
+!Core/Inc/task_sensor.h
+!Core/Inc/task_menu.h
+!Core/Inc/ds18b20.h
+!Core/Inc/devices.h
+!Core/Inc/uart_io.h
+!Core/Inc/events.h
+
+# === Startup (usually auto-generated but sometimes edited) ===
+# Uncomment if you need to track startup files:
+# !Core/Startup/**
+
+# === Linker script (sometimes edited for heap/stack) ===
+# Uncomment if needed:
+# !STM32F103C8Tx_FLASH.ld
+
+# === CubeIDE config (optional — uncomment to track) ===
+# !.cproject
+# !.project
